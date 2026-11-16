@@ -1,0 +1,32 @@
+{
+  "targets": {
+    "response_seconds": 300,
+    "resolution_seconds": 3600
+  },
+  "incidents": [
+    {
+      "id": "I-1",
+      "opened": 1000,
+      "first_response": 1400,
+      "resolved": 5000
+    },
+    {
+      "id": "I-2",
+      "opened": 2000,
+      "first_response": 2100,
+      "resolved": null
+    }
+  ],
+  "pauses": [
+    {
+      "incident": "I-1",
+      "start": 1100,
+      "end": 1300
+    },
+    {
+      "incident": "I-1",
+      "start": 1200,
+      "end": 1600
+    }
+  ]
+}
