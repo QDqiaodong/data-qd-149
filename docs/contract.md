@@ -98,3 +98,50 @@ BATCH 严格为 `{batch_id, replacements, close}`：
 - `cycle_state(contract,cycle,closed,close_seq)`：封账状态。
 - `entries(seq,contract,cycle,kind,amount_cents)`：只追加的分录。
 - `audit_cycles(seq,contract,cycle,closed,outage_intervals,downtime_seconds,liability_cents,posted_cents)`：每批每周期的审计快照（`outage_intervals` 为 JSON 文本），与 `report_json` 内容一致、便于 SQL 核查。
+
+
+# 跨系统事故遥测对齐 v4
+
+v4 是离线数据应用，回答“多个采集系统各自的本地时钟与含糊事故标签联合起来，证据真正支持哪些事件归属于哪起事故、以及能够成立的UTC时间范围”，供数据治理人员判断哪些记录可以合并。它不安排响应人员、不计算赔付，也不把不确定时间任选一点当成事实。命令行用 `--reconcile-source FILE --output FILE`，与 v1/v2/v3 全部入口互斥；成功输出 `schema_version=4` 并保留源字节 SHA256；仅标准库、无网络服务、无持久数据库。
+
+## 输入契约（拒绝未知字段、重复键、布尔冒充整数、非法引用）
+
+顶层严格包含 `sources`、`syncs`、`incidents`、`events` 四个字段，数组上限整体校验。
+
+- `sources` 为 1..8 条 `{id, min_offset, max_offset}`。每个系统有一个**全局共享**整数偏移 `o`，`UTC = local + o`；`-10^9 <= min_offset <= max_offset <= 10^9`；`id` 唯一并沿用标识符规则。
+- `syncs` 最多 32 条 `{id, left, right, min_delta, max_delta}`，独立唯一 `id`，引用已有 source，要求 `min_delta <= o[right] - o[left] <= max_delta`，界限在 `[-2*10^9, 2*10^9]`。允许自引用、重复系统对及零宽约束——每条都是独立证据，不因重复而合并或失效。
+- `incidents` 为 1..4 个唯一事故 id。
+- `events` 恰为 `3*事故数` 条 `{id, source, local, phase, candidates}`，`id` 唯一、`source` 有效、`local` 为 `0..4102444800` 整数；`phase` 只能是 `opened`、`first_response`、`resolved`，且每种 phase 的条数恰等于事故数；`candidates` 是非空、无重复的已有事故 id 数组。
+
+结构合法但无任何全局解释是**正常业务结果**：报告 `status=infeasible`，退出 0，`sources/events/incidents` 均为空数组；不复用输入错误退出码 2。
+
+## 时钟证据
+
+联合处理偏移边界、同步差值与各事件 `UTC∈[0,4102444800]` 的限制。一个归属下的时钟可行域是整数差分约束系统 `x_v - x_u <= w`（偏移盒、同步差值、事件UTC窗、生命周期次序）；精确极值取自该约束图的最短路闭包（Floyd–Warshall，全整数权）。因此：
+
+- 不逐秒枚举偏移（偏移跨度可达 20 亿秒），也不以浮点容差判定整数可行性；
+- 保留系统间相关性，绝不把各 source 独立最小/最大值的笛卡尔积当成可行时钟；
+- 负偏移、等式同步、多跳相关性、矛盾环、自引用矛盾、20 亿秒跨度与 UTC 边界都按同一机制精确处理。
+
+## 事件归属与生命周期
+
+每个 event 必须且只能归给 `candidates` 中的一个事故；每个事故必须恰好得到三个不同 phase 的事件。归属后 `opened <= first_response <= resolved` 必须按**精确整数UTC**成立。v1 事故生命周期的顺序/缺失约束已提取为 `model.validate_lifecycle` 共用能力，v1 四种输入（已响应/未响应 × 已解决/未解决）的接受或拒绝行为保持不变；对齐模块每个完整具体生命周期也通过同一能力校验（对齐输入三相位齐全，但校验器仍保留 v1 允许缺失的语义）。不用原 v1 接受区间或模糊时间替代整数。
+
+## 联合求解（不得先校时再做二分图匹配）
+
+一个全局解释同时包含所有 source 偏移与所有 event 归属，并满足全部证据。若某事件归属引入的生命周期次序收紧了系统间偏移差值，时钟证据职责必须把该限制带入其他事件归属的可行性判断；反过来，同步证据排除一个时钟组合时，也必须剔除依赖它的归属。实现按相位枚举候选双射（`permutations`，按候选成员过滤），但对每一个**完整归属**都与时钟证据**联合**求可满足性：生命周期次序直接作为差分约束边加入同一约束图。因此不存在“先独立校时、再做普通匹配”的分解；不引入目标函数，所有合法解释地位相同。
+
+## v4 报告
+
+`result.status` 为 `feasible` 或 `infeasible`。
+
+- 可行时 `sources` 按 id 输出 `{id, offset_min, offset_max}`，为所有全局解释的**精确极值**。
+- `events` 按 id 输出 `{id, possible_incidents, forced_incident}`；`possible_incidents` 为全局有解的事故 id 排序集合，仅当集合大小为 1 时 `forced_incident` 才为该 id，否则 `null`。
+- `incidents` 按 id 输出 `{id, opened, first_response, resolved, response_elapsed, resolution_elapsed}`，每项时间或时长均为 `{min,max}`。`response_elapsed = first_response - opened`、`resolution_elapsed = resolved - opened`，**必须在同一解释内做差再求极值**，不得用两个独立时间范围的端点相减（否则宽时间范围下固定差值会被错误放宽）。
+- 所有范围与 possible 关系都由至少一个**完整**全局解释支持；不同极值可以来自不同解释，报告不声称它们能同时实现；不报告某个最优解、可行样例或匹配局部可行边。
+
+报告精确且字节稳定；沿用受限 JSON 读取、SHA 与安全文件替换；拒绝输入输出同路径及符号链接；失败退出 2 且保留旧输出。
+
+## 正确性说明（为何不丢解、不混入不存在的解释）
+
+相位双射枚举覆盖每个事件到候选事故的每一种可能归属；对每个归属，差分约束系统可满足当且仅当存在真实整数偏移向量使其全部约束成立，且约束图无负环是其充要条件（最短路三角不等式给出构造性见证）。极值查询使用约束闭包：节点 `i` 的偏移下/上界为 `-d(i,ref)`、`d(ref,i)`；事件 `e`（source `s`、local `l`）的UTC下/上界为 `l - d(s,ref)`、`l + d(ref,s)`。这些值均为整数，且在图可行时在最短路闭包中取紧可达。因此所报范围恰为所有全局解释的并集投影，既不遗漏（每个可行的相位归属都被枚举并与时钟联合检验），也不多报（每个被报告的值都对应一个完整解释）。时长在单解释内取差后再做“跨解释”极值，故得到的是真实可实现时长的极值。

@@ -1,0 +1,18 @@
+{
+  "sources": [
+    {"id": "collector-a", "min_offset": -10, "max_offset": -10},
+    {"id": "collector-b", "min_offset": 0, "max_offset": 0}
+  ],
+  "syncs": [
+    {"id": "link-ab", "left": "collector-a", "right": "collector-b", "min_delta": 10, "max_delta": 10}
+  ],
+  "incidents": ["INC-7", "INC-9"],
+  "events": [
+    {"id": "ev-open-a", "source": "collector-a", "local": 1010, "phase": "opened", "candidates": ["INC-7", "INC-9"]},
+    {"id": "ev-open-b", "source": "collector-b", "local": 2000, "phase": "opened", "candidates": ["INC-7", "INC-9"]},
+    {"id": "ev-resp-a", "source": "collector-a", "local": 1090, "phase": "first_response", "candidates": ["INC-7", "INC-9"]},
+    {"id": "ev-resp-b", "source": "collector-b", "local": 2600, "phase": "first_response", "candidates": ["INC-7", "INC-9"]},
+    {"id": "ev-done-a", "source": "collector-a", "local": 1290, "phase": "resolved", "candidates": ["INC-7", "INC-9"]},
+    {"id": "ev-done-b", "source": "collector-b", "local": 2900, "phase": "resolved", "candidates": ["INC-7", "INC-9"]}
+  ]
+}

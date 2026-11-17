@@ -1,10 +1,11 @@
 # data-qd-149 · 事故响应SLA核算与共享人员工作计划
 
-本仓提供三个相互独立、离线运行的数据应用，业务输入、计算和边界详见 [数据契约](docs/contract.md)：
+本仓提供四个相互独立、离线运行的数据应用，业务输入、计算和边界详见 [数据契约](docs/contract.md)：
 
 1. **v1 经过时长 SLA 核算**：按显式排除的暂停区间核算响应与解决有效时长。
 2. **v2 共享响应人员工作计划**：在有限人员下，精确求出哪些未响应事故能完整按双 SLA 服务及最优排班。
 3. **v3 冗余服务故障赔付结算**：用组件停机事实与服务依赖图结算合同周期赔付，SQLite 账本持久化故障更正、封账与追补金额。
+4. **v4 跨系统事故遥测对齐**：联合多个采集系统的本地时钟偏移、同步证据与含糊事故标签，给出证据真正支持的事件归属与精确UTC时间/时长范围。
 
 ## 安装与演示
 
@@ -20,6 +21,8 @@ python3 -m venv .venv
 .venv/bin/incident-sla --source fixtures/input.json --output run/report.json
 # v2 共享人员工作计划（与 --source 互斥）
 .venv/bin/incident-sla --plan-source fixtures/plan_input.json --output run/plan_report.json
+# v4 跨系统遥测对齐（与上述入口互斥）
+.venv/bin/incident-sla --reconcile-source fixtures/reconcile_input.json --output run/reconcile_report.json
 # v3 故障赔付结算（三个互斥入口，账本在 run/ledger.db）
 .venv/bin/incident-sla --credit-init fixtures/credit_config.json --db run/ledger.db
 .venv/bin/incident-sla --credit-apply fixtures/credit_batch1.json --db run/ledger.db --output run/credit_1.json
@@ -38,10 +41,16 @@ python3 -m venv .venv
 输入和输出不得相同，输出符号链接拒绝。单操作者批处理，不承诺并发发布或断电恢复。
 同输入重跑不累加（报告字节稳定）。测试使用临时目录，运行产物在忽略的run/。
 
-`src/incident_sla/model.py` 与 `sla.py` 为 v1 业务模型，`plan.py` 为 v2 规划器，`credit.py` 为 v3 结算账本；
+`src/incident_sla/model.py` 与 `sla.py` 为 v1 业务模型（`validate_lifecycle` 为 v1 与 v4 共用的生命周期校验），`plan.py` 为 v2 规划器，`credit.py` 为 v3 结算账本，`reconcile.py` 为 v4 联合对齐求解器；
 `sla.py` 的 `merge`/`union` 是三个版本共用的半开区间并集能力（`merge` 返回规范不相交区间，`union` 保持原数值接口）；
 `common.py` 提供受限JSON及报告发布，`cli.py` 用互斥参数衔接三种数据链路。
 fixtures 为明确自制样例，代码与样例采用MIT许可。
+
+## v4 跨系统事故遥测对齐
+
+多个采集系统各有一个全局共享整数偏移 `o`（`UTC = local + o`）。sources（1..8）给偏移边界，syncs（≤32）给系统间偏移差值界限，incidents（1..4）为事故 id，events 恰为 `3*事故数` 条、覆盖 opened/first_response/resolved 三相位并各带候选事故。求解联合处理偏移、同步、事件UTC窗口与生命周期次序：每个完整归属都作为整数差分约束系统与时钟证据一并检验，精确极值取自约束图最短路闭包——不逐秒枚举偏移、不用浮点容差、不把各系统独立范围做笛卡尔积、更不先校时再匹配。
+
+报告给出 `status`、按 id 的 `sources{offset_min,offset_max}`、`events{possible_incidents,forced_incident}`、`incidents` 三时间点及 `response_elapsed`/`resolution_elapsed` 的 `{min,max}`；时长在同一解释内做差再求极值。结构合法但无全局解释时输出 `infeasible`（退出 0，空数组）；输入结构错误退出 2。完整契约见 [数据契约](docs/contract.md)。
 
 ## v1 经过时长 SLA 核算
 
