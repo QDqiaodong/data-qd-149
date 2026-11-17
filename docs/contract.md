@@ -145,3 +145,46 @@ v4 是离线数据应用，回答“多个采集系统各自的本地时钟与�
 ## 正确性说明（为何不丢解、不混入不存在的解释）
 
 相位双射枚举覆盖每个事件到候选事故的每一种可能归属；对每个归属，差分约束系统可满足当且仅当存在真实整数偏移向量使其全部约束成立，且约束图无负环是其充要条件（最短路三角不等式给出构造性见证）。极值查询使用约束闭包：节点 `i` 的偏移下/上界为 `-d(i,ref)`、`d(ref,i)`；事件 `e`（source `s`、local `l`）的UTC下/上界为 `l - d(s,ref)`、`l + d(ref,s)`。这些值均为整数，且在图可行时在最短路闭包中取紧可达。因此所报范围恰为所有全局解释的并集投影，既不遗漏（每个可行的相位归属都被枚举并与时钟联合检验），也不多报（每个被报告的值都对应一个完整解释）。时长在单解释内取差后再做“跨解释”极值，故得到的是真实可实现时长的极值。
+
+
+# 可轮换密钥的事故证据仓 v5
+
+v5 是离线的多租户事故证据仓：把多个租户的 v1 事故数据加密进同一个 SQLite 仓库，按租户精确检索、还原并核算 SLA，并支持不离线的密钥轮换。它不使用排班、赔付或遥测对齐概念；存入的唯一业务载荷是 v1 `targets/incidents/pauses` 文档，校验直接调用 `model.analyze` 本身，接受/拒绝契约与 v1 完全一致。四个互斥入口，均须 `--db DB --keyring FILE`：`--vault-init`（另须 `--key-id KEYID`）、`--vault-import FILE`、`--vault-query TENANT`（另须 `--output FILE`）、`--vault-rekey KEYID`（另须 `--limit N`）；其余参数组合（含把 `--keyring/--key-id/--limit` 用于 v1-v4 入口）一律拒绝。加密使用锁版本的 `cryptography` 依赖（AES-256-GCM 与 HKDF），不接任何外部密钥服务；v1-v4 入口与报告保持兼容、仍只用标准库。
+
+## 密钥环契约（每命令重新读入）
+
+KEYRING 严格为 `{"keys":[{"id","key_hex"}]}`，拒绝未知字段与重复键。`id` 沿用标识符规则且在环内唯一；`key_hex` 恰为 64 位小写十六进制（32 字节）。每个命令执行时重新读入并校验整个密钥环；密钥字节绝不写入 DB、日志或报告，stdout/stderr 与出错信息不含 `key_hex`。环中每个密钥是一个 256 位密钥加密密钥（KEK），以其 `id` 作为密钥版本。
+
+## init：只创建不存在的仓库
+
+`--vault-init --db DB --keyring FILE --key-id KEYID` 仅在 DB 不存在（也不是符号链接）时创建仓库，已存在即拒绝。`KEYID` 必须存在于密钥环，成为首个活动密钥。init 生成 16 字节随机仓库身份 `vault_id`（32 位小写十六进制）并持久化于 `meta`，此后所有查询与轮换报告都携带它；密文 AAD 绑定该身份，使跨仓库移植密文必然认证失败。init 失败不留残缺 DB。
+
+## import：整批校验、原子入仓
+
+输入严格为 `{"documents":[{"id","tenant","payload"}]}`，1..100 条。`id` 沿用标识符规则，批内与仓内都唯一且不可修改（重复 id 整批拒绝，无重放语义）；`tenant` 沿用标识符规则、大小写敏感、不做任何 Unicode 正规化；`payload` 严格复用 v1 的 `targets/incidents/pauses` 接受与拒绝契约（未知字段、缺失生命周期、重叠暂停等行为与 v1 相同）。整批先完整校验再原子入仓：任一重复 id 或非法 payload 都不得部分写入。
+
+每份 payload 保存其规范 JSON 的 SHA256 以核实还原。规范字节精确为 `json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',',':'), allow_nan=False).encode('utf-8')`，无末尾换行，Unicode 不额外正规化；摘要随记录一起加密，查询解密后重算比对。
+
+## 数据表示（加密入仓职责）
+
+- 每份文档生成全新随机 256 位文档密钥（DEK）。记录 `{"payload","payload_sha256","tenant"}` 以规范 JSON 序列化后用 AES-256-GCM 在 DEK 下加密；DEK 用活动 KEK 以 AES-256-GCM 封装。两处加密的 AAD 都绑定 `vault_id` 与 document id（封装还绑定 key id），因此翻转密文/nonce、跨文档替换密文、跨仓库移植整条记录都认证失败。
+- 随机 96 位 nonce 遵循 AES-GCM 的不重复要求（NIST SP 800-38D 随机 nonce 构造；本仓单写者且文档数远低于每密钥 2^32 次调用的界限）。不自设计密码算法，全部使用成熟库的 AEAD/HKDF/HMAC 原语。
+- 租户等值索引是带密钥且不可逆的：索引键由 KEK 经 HKDF-SHA256（域分离 info）派生，token 为 `HMAC-SHA256(索引键, tenant)`。不以普通 SHA 或确定性明文加密充当租户索引。
+- `key_checks` 为每个在仓内出现过的密钥版本保存不可逆校验值 `HMAC-SHA256(KEK, 域分离串 || vault_id || key_id)`。每个命令在使用任何密钥前先核对其校验值：密钥值错误（id 对、值错）在写入前明确拒绝，绝不产生乱码业务数据或把部分可读误报为成功。轮换完成时删除已退役密钥的校验值。
+- DB 中除 document id、仓库身份、密钥版本、计数、密文元信息（nonce、封装 DEK、记录密文、校验值）与带密钥等值索引外，不出现 tenant、事故值或密钥明文；该禁令同样覆盖回滚日志/WAL 与任何临时文件（明文只存在于进程内存与最终发布的查询报告中）。
+
+一份文档的逻辑版本 = 记录密文 + 可解密密钥材料（`key_id, wrap_nonce, wrapped_dek`）+ 索引行（`doc_id, token`）。轮换时 DEK 不变（记录密文无需重加密），封装与索引在同一 SQLite 事务内一起切到目标密钥，因此密钥可解密性与索引可达性始终一致：任何已提交状态下，每份文档都能被其 `key_id` 指向的 KEK 解开封装，并被该 KEK 派生的索引 token 精确定位。
+
+## query：混合版本检索职责
+
+`--vault-query TENANT --db DB --keyring FILE --output FILE` 按 tenant 的完整标识精确选中全部文档（大小写、前缀、Unicode 形似标识都互不匹配）。实现对仓内仍被引用的每个密钥版本各算一次 token（轮换中至多新旧两个），经 SQLite 索引 `tenant_index_by_token` 做带密钥等值检索，只解密候选行；解密后核实记录内 tenant 与查询相等、payload 摘要与重算一致，任一认证失败退出 2 且不发布部分报告。非命中行的密文损坏不影响该 tenant 的查询（这同时证明没有偷偷全仓解密）。输出严格为 `{schema_version:5, vault_id, tenant, documents}`；`documents` 按 id 排序，每份严格为 `{id, tenant, payload, payload_sha256, sla}`，`sla` 是 `model.analyze(payload)` 的完整结果。相同仓库状态与查询的 JSON 字节稳定；查询以只读方式打开、不写 DB；零命中返回空数组并成功；失败保留旧输出。
+
+## rekey：原子轮换职责
+
+`--vault-rekey KEYID --db DB --keyring FILE --limit N`，N 为 1..100。第一次调用在单个事务内把新写入的活动密钥切到 KEYID 并至多迁移 N 份旧版本文档；后续同目标调用继续迁移。任一时刻至多一个未完成目标（`meta.rekey_target`），未完成时改另一目标（含改回旧密钥）整体拒绝。各次调用之间可以 import 和 query：新导入使用新活动密钥，旧文档始终能被查到。只有全部文档及所需索引/密钥材料均不再依赖旧密钥时才报告 `completed=true`。成功状态严格为 `{schema_version:5, vault_id, active_key_id, migrated, remaining, completed}`，`migrated` 为本次迁移文档数，`remaining` 为仍需迁移的文档数；完成后再次同目标调用返回 `migrated=0, remaining=0, completed=true`。
+
+每次 rekey 用单个 SQLite 事务提交本次进度：本批全部封装/索引密码学先在事务内、任何写入前完成（缺密钥或密钥值错误在此拒绝并回滚），提交前异常整体回滚；提交后进程终止时，再运行同目标即可继续——候选永远按 `key_id != 目标` 重新选取，不重复创建文档，不依赖进程内游标。合法的部分进度不漏查、不重查，也不会出现“用旧索引定位后因新密文而报错”。
+
+## 退役保证与威胁边界
+
+轮换完成后：只提供新密钥必须能读取全部文档并继续入仓；仅持有旧密钥必须不能从当前逻辑有效记录及其可达封装恢复任何 tenant 或 payload（旧密钥的封装、索引 token 与校验值都已随完成事务移除）。退役保证**不包括**旧 DB 快照以及 SQLite 空闲页、旧日志/WAL 中已失效密文/封装残留，不以逻辑删除声称物理擦除；前述“禁止写入业务明文”仍覆盖这些文件。仓库为单写者；不承诺抵御整库回滚、删除行或泄露访问频率/文档 id/条数。测试专用钩子 `INCIDENT_SLA_VAULT_TEST_FAULT` 在命名步骤注入崩溃（提交前/后），仅供测试在真实子进程中验证恢复语义，正常运行不读取该变量以外的任何环境状态。

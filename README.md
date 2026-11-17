@@ -1,20 +1,22 @@
 # data-qd-149 · 事故响应SLA核算与共享人员工作计划
 
-本仓提供四个相互独立、离线运行的数据应用，业务输入、计算和边界详见 [数据契约](docs/contract.md)：
+本仓提供五个相互独立、离线运行的数据应用，业务输入、计算和边界详见 [数据契约](docs/contract.md)：
 
 1. **v1 经过时长 SLA 核算**：按显式排除的暂停区间核算响应与解决有效时长。
 2. **v2 共享响应人员工作计划**：在有限人员下，精确求出哪些未响应事故能完整按双 SLA 服务及最优排班。
 3. **v3 冗余服务故障赔付结算**：用组件停机事实与服务依赖图结算合同周期赔付，SQLite 账本持久化故障更正、封账与追补金额。
 4. **v4 跨系统事故遥测对齐**：联合多个采集系统的本地时钟偏移、同步证据与含糊事故标签，给出证据真正支持的事件归属与精确UTC时间/时长范围。
+5. **v5 可轮换密钥的事故证据仓**：把多租户 v1 事故数据加密进同一 SQLite 仓库，按租户精确检索、还原并核算 SLA，支持原子密钥轮换与旧密钥退役。
 
 ## 安装与演示
 
-Python >=3.11，运行和测试仅用标准库；先确认 `python3 --version`。
+Python >=3.11。v1-v4 仅用标准库；v5 证据仓使用锁版本的 `cryptography` 依赖（见 `requirements.lock`，AES-256-GCM/HKDF，不接外部密钥服务）。先确认 `python3 --version`。
 每仓建立独立环境，构建工具锁版本。首次安装无公共缓存时可能联网；业务运行不访问网络。
 
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-build.lock
+.venv/bin/python -m pip install -r requirements.lock
 .venv/bin/python -m pip install --no-build-isolation --no-deps .
 .venv/bin/pip check
 # v1 经过时长核算
@@ -30,6 +32,14 @@ python3 -m venv .venv
 .venv/bin/incident-sla --credit-apply fixtures/credit_batch3.json --db run/ledger.db --output run/credit_3.json
 .venv/bin/incident-sla --credit-apply fixtures/credit_batch4.json --db run/ledger.db --output run/credit_4.json
 .venv/bin/incident-sla --credit-view 1 --db run/ledger.db --output run/credit_view_1.json
+# v5 证据仓（四个互斥入口，均须 --db 与 --keyring；fixtures 密钥仅为演示）
+.venv/bin/incident-sla --vault-init --db run/vault.db --keyring fixtures/vault_keyring.json --key-id key-2026-a
+.venv/bin/incident-sla --vault-import fixtures/vault_import1.json --db run/vault.db --keyring fixtures/vault_keyring.json
+.venv/bin/incident-sla --vault-query acme --db run/vault.db --keyring fixtures/vault_keyring.json --output run/vault_acme.json
+# 以 limit=1 轮换到 key-2026-b（真实混合版本），轮换期间可继续导入与查询
+.venv/bin/incident-sla --vault-rekey key-2026-b --db run/vault.db --keyring fixtures/vault_keyring.json --limit 1
+.venv/bin/incident-sla --vault-import fixtures/vault_import2.json --db run/vault.db --keyring fixtures/vault_keyring.json
+.venv/bin/incident-sla --vault-rekey key-2026-b --db run/vault.db --keyring fixtures/vault_keyring.json --limit 100
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
@@ -41,9 +51,9 @@ python3 -m venv .venv
 输入和输出不得相同，输出符号链接拒绝。单操作者批处理，不承诺并发发布或断电恢复。
 同输入重跑不累加（报告字节稳定）。测试使用临时目录，运行产物在忽略的run/。
 
-`src/incident_sla/model.py` 与 `sla.py` 为 v1 业务模型（`validate_lifecycle` 为 v1 与 v4 共用的生命周期校验），`plan.py` 为 v2 规划器，`credit.py` 为 v3 结算账本，`reconcile.py` 为 v4 联合对齐求解器；
+`src/incident_sla/model.py` 与 `sla.py` 为 v1 业务模型（`validate_lifecycle` 为 v1 与 v4 共用的生命周期校验），`plan.py` 为 v2 规划器，`credit.py` 为 v3 结算账本，`reconcile.py` 为 v4 联合对齐求解器，`vault.py` 为 v5 证据仓；
 `sla.py` 的 `merge`/`union` 是三个版本共用的半开区间并集能力（`merge` 返回规范不相交区间，`union` 保持原数值接口）；
-`common.py` 提供受限JSON及报告发布，`cli.py` 用互斥参数衔接三种数据链路。
+`common.py` 提供受限JSON及报告发布，`cli.py` 用互斥参数衔接五种数据链路。
 fixtures 为明确自制样例，代码与样例采用MIT许可。
 
 ## v4 跨系统事故遥测对齐
@@ -93,6 +103,20 @@ v3 回答“组件停机让合同服务不可用多久、本期应赔多少、�
 样例 fixtures 构造菱形共享组件：`db-shared` 同时是 `svc-read` 与 `svc-write` 的必要子节点，根服务 `svc-root`
 需要两个子服务都可用。四个批次演示：停机 120 秒跨 100 秒档封账 250000 分 → 更正为 600 秒跨 500 秒档追补
 750000 分 → 撤销回 120 秒追回 750000 分 → 再恢复只补上一次追回的 750000 分；共享组件全程只计一次停机。
+
+## v5 可轮换密钥的事故证据仓
+
+v5 把多个租户的 v1 事故文档加密进同一个 SQLite 仓库：每份文档一个随机 DEK，记录（tenant、payload、payload
+规范 JSON 的 SHA256）以 AES-256-GCM 加密，DEK 由活动 KEK 封装，AAD 绑定随机仓库身份与 document id；租户
+等值索引是由 KEK 经 HKDF 派生的索引键计算的 HMAC-SHA256，DB 中不出现 tenant、事故值或密钥明文。查询按
+仍被引用的密钥版本各算一次 token，经 SQLite 索引只解密候选行，输出 `{schema_version:5, vault_id, tenant,
+documents}`，每份文档含 `{id, tenant, payload, payload_sha256, sla}`（`sla` 即 `model.analyze` 的完整结果）。
+
+轮换按 `--vault-rekey KEYID --limit N` 分片推进：首次调用在单个事务内切换活动密钥并迁移至多 N 份文档，封装
+与索引作为每份文档的逻辑版本一起切换；提交前异常整体回滚，提交后中断可由同目标调用继续。轮换期间可正常
+导入（用新密钥）与查询（混合版本）。`completed=true` 后旧密钥的封装、索引与校验值均不再被引用，仅持旧密钥
+无法从当前逻辑有效记录恢复任何 tenant 或 payload（不含旧快照/空闲页/旧 WAL 残留，不声称物理擦除）。完整
+契约、密钥环格式、退役语义与威胁边界见 [数据契约](docs/contract.md)。
 
 ### 数据表示与审计恢复承担的正确性义务
 

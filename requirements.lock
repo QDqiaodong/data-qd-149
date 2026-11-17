@@ -1,1 +1,7 @@
-# Runtime uses only Python standard library.
+# Runtime dependencies, version-locked.  The v5 evidence vault uses the
+# pinned `cryptography` package for AES-256-GCM and HKDF; v1-v4 use only the
+# Python standard library.  cffi/pycparser are cryptography's own pinned
+# transitive dependencies.
+cryptography==43.0.3
+cffi==2.1.1
+pycparser==3.12

@@ -1,0 +1,19 @@
+{
+  "documents": [
+    {
+      "id": "acme-2026-0003",
+      "tenant": "acme",
+      "payload": {
+        "targets": {"response_seconds": 60, "resolution_seconds": 600},
+        "incidents": [
+          {"id": "I-31", "opened": 20000, "first_response": 20045, "resolved": 20500},
+          {"id": "I-32", "opened": 21000, "first_response": 21100, "resolved": 21900}
+        ],
+        "pauses": [
+          {"incident": "I-32", "start": 21200, "end": 21400},
+          {"incident": "I-32", "start": 21300, "end": 21600}
+        ]
+      }
+    }
+  ]
+}

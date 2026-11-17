@@ -35,6 +35,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+from .common import check_paths as _check_paths
 from .common import ident, read, require, rows, save
 from .sla import merge
 
@@ -457,21 +458,6 @@ def _load_spec(conn):
         'cycles_by_contract': {c['id']: {y['id'] for y in c['cycles']}
                                for c in contracts},
     }
-
-
-def _check_paths(inputs, db_path, output_path):
-    """Reject same-path and symlink tricks among input, db and output."""
-    paths = [Path(p) for p in inputs]
-    if db_path is not None:
-        paths.append(Path(db_path))
-    if output_path is not None:
-        paths.append(Path(output_path))
-    for path in paths:
-        if path.is_symlink():
-            raise ValueError('symlink rejected: %s' % path)
-    resolved = [str(p.resolve()) for p in paths]
-    if len(set(resolved)) != len(resolved):
-        raise ValueError('input, db and output paths must differ')
 
 
 def init_db(config_path, db_path):

@@ -1,0 +1,44 @@
+{
+  "documents": [
+    {
+      "id": "acme-2026-0001",
+      "tenant": "acme",
+      "payload": {
+        "targets": {"response_seconds": 300, "resolution_seconds": 3600},
+        "incidents": [
+          {"id": "I-1", "opened": 1000, "first_response": 1400, "resolved": 5000},
+          {"id": "I-2", "opened": 2000, "first_response": 2100, "resolved": null}
+        ],
+        "pauses": [
+          {"incident": "I-1", "start": 1100, "end": 1300},
+          {"incident": "I-1", "start": 1200, "end": 1600}
+        ]
+      }
+    },
+    {
+      "id": "acme-2026-0002",
+      "tenant": "acme",
+      "payload": {
+        "targets": {"response_seconds": 600, "resolution_seconds": 7200},
+        "incidents": [
+          {"id": "I-9", "opened": 10000, "first_response": null, "resolved": null}
+        ],
+        "pauses": []
+      }
+    },
+    {
+      "id": "globex-2026-0001",
+      "tenant": "globex",
+      "payload": {
+        "targets": {"response_seconds": 120, "resolution_seconds": 900},
+        "incidents": [
+          {"id": "G-1", "opened": 500, "first_response": 700, "resolved": 2000},
+          {"id": "G-2", "opened": 800, "first_response": 830, "resolved": 1500}
+        ],
+        "pauses": [
+          {"incident": "G-1", "start": 900, "end": 1000}
+        ]
+      }
+    }
+  ]
+}

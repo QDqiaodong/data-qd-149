@@ -31,6 +31,16 @@ def read(path):
     data=json.loads(raw,object_pairs_hook=unique,parse_constant=invalid)
     return data,hashlib.sha256(raw).hexdigest()
 
+def check_paths(inputs,db_path,output_path):
+    """Reject same-path and symlink tricks among input, db and output."""
+    paths=[Path(p) for p in inputs]
+    if db_path is not None:paths.append(Path(db_path))
+    if output_path is not None:paths.append(Path(output_path))
+    for path in paths:
+        if path.is_symlink():raise ValueError('symlink rejected: %s' % path)
+    resolved=[str(p.resolve()) for p in paths]
+    if len(set(resolved))!=len(resolved):raise ValueError('input, db and output paths must differ')
+
 def save(path,report):
     dest=Path(path)
     if dest.is_symlink():raise ValueError('output cannot be a symlink')
