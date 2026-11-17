@@ -1,0 +1,12 @@
+{
+  "batch_id": "B-001",
+  "replacements": [
+    {
+      "component": "db-shared",
+      "intervals": [[0, 120]]
+    }
+  ],
+  "close": [
+    {"contract": "gold-2026", "cycle": "2026-01"}
+  ]
+}

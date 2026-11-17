@@ -1,0 +1,39 @@
+{
+  "components": ["db-shared", "cache-a", "store-b"],
+  "services": [
+    {
+      "id": "svc-read",
+      "children": ["db-shared", "cache-a"],
+      "required": 2
+    },
+    {
+      "id": "svc-write",
+      "children": ["db-shared", "store-b"],
+      "required": 2
+    },
+    {
+      "id": "svc-root",
+      "children": ["svc-read", "svc-write"],
+      "required": 2
+    }
+  ],
+  "contracts": [
+    {
+      "id": "gold-2026",
+      "service": "svc-root",
+      "cycles": [
+        {
+          "id": "2026-01",
+          "start": 0,
+          "end": 1000,
+          "fee_cents": 1000000
+        }
+      ],
+      "tiers": [
+        {"after_seconds": 0, "rate_bps": 0},
+        {"after_seconds": 100, "rate_bps": 2500},
+        {"after_seconds": 500, "rate_bps": 10000}
+      ]
+    }
+  ]
+}

@@ -1,10 +1,33 @@
-def union(intervals):
-    total=0;left=right=None
+"""Half-open interval union primitives shared by every schema version.
+
+Intervals are half-open [start, end) integer-second spans.  ``merge`` is the
+shared canonicalizer: it returns the sorted, pairwise disjoint, non-empty
+intervals covering exactly the same time set as its input, so callers can
+inspect the outage shape itself instead of only its length.  ``union`` keeps
+the original numeric interface (total covered seconds) for the v1/v2
+consumers; the v3 fault-impact engine reuses ``merge`` directly so impact
+intervals stay auditable and are never expanded per second.
+"""
+
+def merge(intervals):
+    """Return the canonical sorted disjoint half-open intervals.
+
+    Overlapping or touching inputs coalesce; empty or inverted spans
+    contribute nothing.  The output covers exactly the same seconds as the
+    valid spans of the input, which keeps ``union`` below numerically
+    identical to its previous implementation for every well-formed input.
+    """
+    merged=[]
     for a,b in sorted(intervals):
-        if left is None:left,right=a,b
-        elif a<=right:right=max(right,b)
-        else:total+=right-left;left,right=a,b
-    return total+(right-left if left is not None else 0)
+        if b<=a:continue
+        if merged and a<=merged[-1][1]:
+            if b>merged[-1][1]:merged[-1][1]=b
+        else:merged.append([a,b])
+    return [(a,b) for a,b in merged]
+
+def union(intervals):
+    """Total seconds covered by ``intervals`` with overlaps counted once."""
+    return sum(b-a for a,b in merge(intervals))
 
 def measure(incidents,pauses,targets):
     by_id={i['id']:[] for i in incidents}

@@ -1,0 +1,10 @@
+{
+  "batch_id": "B-002",
+  "replacements": [
+    {
+      "component": "db-shared",
+      "intervals": [[0, 600]]
+    }
+  ],
+  "close": []
+}

@@ -46,3 +46,55 @@ v2 是离线的有限人员排班应用，回答“有限人员下哪些未响�
 
 `result` 含：`objective{value,count,completion_sum}`；`schedule` 工作项 `{slot,responder,incident,phase}`；按 id 排序的 `selected{id,first_response,resolved,response_active_seconds,resolution_active_seconds}`；按 id 排序的 `excluded` 字符串数组。所报时刻与有效秒均由实际 schedule 重建并核验。相同输入报告字节稳定；任何阶段失败退出码 2 且旧输出不变，沿用受限 JSON、输入/输出同路径拒绝与符号链接保护。
 
+
+# 冗余服务故障赔付结算 v3
+
+v3 是离线的故障赔付结算应用：用组件停机事实与服务依赖图计算各合同周期的精确不可用时长，按阶梯费率得出当前应赔额，并在 SQLite 账本中持久化故障更正、封账与追补/追回分录。它不使用事故响应人员、排班或候选 SLA 时钟。三个互斥入口：`--credit-init CONFIG --db DB`、`--credit-apply BATCH --db DB --output REPORT`、`--credit-view SEQ --db DB --output REPORT`；仅标准库、单写者、离线运行，不承诺多写者协调或数据库文件损毁恢复。
+
+## 配置契约（init 一次写入，此后不可修改）
+
+CONFIG 严格包含 `components`、`services`、`contracts`，拒绝未知字段、重复键、布尔冒充整数。
+
+- `components` 最多 64 个唯一 id；`services` 最多 64 条 `{id, children, required}`；id 沿用标识符规则（非空、去空白、<=128 字符、无控制字符），且跨组件/服务两表唯一。
+- `children` 为非空、无重复的组件或服务 id 数组，引用必须存在；`required` 为 1..len(children) 整数。拒绝未知引用与任何依赖环（含自环）。
+- 组件停机即不可用，否则可用；服务在可用子节点数少于 `required` 时不可用（等价于至少 `len(children)-required+1` 个子节点同时不可用）。允许子服务被多处共享，同一组件可经多条路径影响同一根服务；实现按区间集合沿 DAG 精确传播，不假设子节点故障独立。
+- `contracts` 最多 100 条 `{id, service, cycles, tiers}`，合同 id 唯一；`service` 必须引用已有服务（不是组件）。
+- `cycles` 最多 24 个互不相交（半开意义下，端点相接允许）的周期 `{id, start, end, fee_cents}`；周期 id 在合同内唯一；`start`、`end` 为 0..4102444800 整数 UTC 秒且 `end>start`；`fee_cents` 为 0..10^12 整数。
+- `tiers` 为非空阶梯表（本实现上限 1000 级），首级必须为 `{after_seconds:0, rate_bps:0}`，`after_seconds` 严格递增（0..4102444800），`rate_bps` 单调不减且为 0..10000 整数。
+- 周期内服务不可用秒数 D 取实际不可用区间裁剪到周期后的并集长度；选择满足 `after_seconds<=D` 的最大档位；当前应赔额 `L=floor(fee_cents*rate_bps/10000)`，只在周期总金额处向下取整一次，不按故障事件分别算钱。
+
+## 批次契约（apply）
+
+BATCH 严格为 `{batch_id, replacements, close}`：
+
+- `batch_id` 沿用标识符规则。已成功提交的 id：原始 BATCH 字节 SHA-256 相同则返回原 seq 与原报告（即使之后已有其他批），不同字节（含仅格式差异）整体拒绝。
+- `replacements` 最多 64 条 `{component, intervals}`，组件不重复且必须存在于配置；`intervals` 每条最多 20000 对 `[start,end]`，全批总区间数最多 20000；端点 0..4102444800 且 `end>start`。每项**完整替换**该组件全部现行停机事实（先规范化为不相交半开区间再落库）；空数组表示撤销；未出现的组件不变。
+- `close` 为无重复的 `{contract, cycle}` 引用数组（隐式上限 2400），引用必须存在；仅允许本批之前未封账的周期，否则整批拒绝。
+- 一个成功 apply 分配从 1 开始的连续 seq；故障事实、周期状态、分录与该批审计视图在同一 SQLite 事务中提交；非法输入或提交前异常不改变它们（整批回滚）。
+
+## 故障影响计算
+
+对规范化后的半开故障区间沿门限 DAG 做扫描线合并，得到每个服务的精确不可用区间集，再裁剪到各合同周期；共享子图只计算一次并作为区间集合复用，因此相关性天然精确：同一组件经菱形两条路径影响根服务时只计一次。半开端点在同一时刻的先后由半开语义决定（`[0,10)` 与 `[10,20)` 相接不重叠也不留缝）。不按每秒展开、不求和子服务秒数。影响区间与 D 随该批审计视图保留供审计。
+
+## 结算账本
+
+- 所有周期初始未封账；每批更正都会重算所有周期的当前 L。
+- `close` 命中的周期按本批更正后的 L 生成一笔 `close` 分录（零额也记）；已封账周期的原 close 金额永不改写。
+- 此前已封账的周期，每批只追加 `adjustment = 当前L - 该周期所有既有分录之和`；差额为零不记；负数表示追回；未封账周期不记分录。因此每批提交后，任一已封账周期的累计分录恒等于其现行 L：撤销更正后又恢复故障时，累计分录重新等于现行 L，而不是一直相对最初 close 金额算差。
+- 每笔分录以 `(seq, contract, cycle)` 唯一（对应唯一 batch_id），含 `kind`（`close`/`adjustment`）与有符号整数 `amount_cents`，按批次序列可还原已记金额。
+
+## 审计视图与恢复
+
+- 每个 seq 的视图永久可读，包含 `schema_version=3`、`seq`、`batch_id`、`source_sha256`，以及按 `(contract, cycle)` 排序的 `cycles{contract, cycle, closed, outage_intervals, downtime_seconds, liability_cents, posted_cents}` 和截至该 seq 按 `(seq, contract, cycle)` 排序的全部分录。`--credit-view` 读出的是提交时存储的视图原文，绝不用当前事实重新解释旧账；相同视图 JSON 字节稳定。
+- DB 提交与报告文件替换不是同一原子动作：提交后、报告生成或替换前中断时，用相同字节重试同批即可恢复原报告且不重复记账；退出 2 保留旧报告，DB 是否已接受该批可由同 id 重试辨明（已接受则返回原报告，未接受则按新批处理）。
+- 输入/DB/输出之间同路径与符号链接均拒绝；沿用受限 JSON 读入（<=8MB、拒绝重复键与非有限数值）。init/view 不产生新 seq。
+
+## 数据库结构（SQLite，schema_version=3）
+
+- `meta(key,value)`：`schema_version`、`config_sha256`（配置原文 SHA-256）、`config_json`（规范化配置，审计用）。
+- `components(id)`；`services(id,required)`；`service_children(service,child,position)`；`contracts(id,service)`；`cycles(contract,id,start_sec,end_sec,fee_cents)`；`tiers(contract,after_seconds,rate_bps)`：均为 init 写入的不可变配置。
+- `facts(component,start_sec,end_sec)`：现行停机事实，每组件为规范不相交区间，apply 时整组替换。
+- `batches(seq,batch_id,source_sha256,report_json)`：seq 从 1 连续；`batch_id` 唯一；`report_json` 为该批审计视图原文，用于同字节重放与历史视图。
+- `cycle_state(contract,cycle,closed,close_seq)`：封账状态。
+- `entries(seq,contract,cycle,kind,amount_cents)`：只追加的分录。
+- `audit_cycles(seq,contract,cycle,closed,outage_intervals,downtime_seconds,liability_cents,posted_cents)`：每批每周期的审计快照（`outage_intervals` 为 JSON 文本），与 `report_json` 内容一致、便于 SQL 核查。
